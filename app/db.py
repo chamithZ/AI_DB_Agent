@@ -2,22 +2,22 @@ from pymongo import MongoClient
 import os
 from dotenv import load_dotenv
 
-# Load environment variables
+# Load environment variables from .env file
 load_dotenv()
 
-MONGO_URI = "mongodb+srv://skillSpanAdmin:16820@cluster0.dxw50go.mongodb.net/SkillSpanDB?retryWrites=true&w=majority "  # MongoDB connection string
-DB_NAME = "SkillSpanDB"
+MONGO_URI = os.getenv("MONGO_URI")
+DB_NAME = os.getenv("DB_NAME")
+
+if not MONGO_URI or not DB_NAME:
+    raise ValueError("Missing MongoDB configuration in environment variables")
 
 client = MongoClient(MONGO_URI)
-db = client[DB_NAME]  # Select database
-collection = db["users"]  # Select collection (table)
+db = client[DB_NAME]  # Database instance
 
+def get_db():
+    """Returns the MongoDB database instance"""
+    return db
 
-users = list(collection.find())  # Get all documents
-
-
-def get_collection():
-    """Returns the MongoDB collection"""
-    return collection
-
-#mongodb+srv://skillSpanAdmin:16820@cluster0.dxw50go.mongodb.net/SkillSpanDB?retryWrites=true&w=majority 
+def get_all_collections():
+    """Returns a list of all collection names in the database"""
+    return db.list_collection_names()

@@ -1,30 +1,40 @@
+import os
 import requests
 import json
 import logging
 import re
-from db import get_collection, client  # Import DB connection
+from db import get_db, get_all_collections, client  # Import DB connection
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 class DBAgent:
     def __init__(self, max_retries=3, timeout=10):
-        self.api_url = "https://api.groq.com/openai/v1/chat/completions"
-        self.api_key = "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"  
+        self.api_url = os.getenv("LLM_API_URL") 
+        self.api_key = os.getenv("GROQ_API_KEY")  # Securely load API key
+        if not self.api_key:
+            raise ValueError("Missing GROQ API key in environment variables")
+
         self.max_retries = max_retries
         self.timeout = timeout
-        self.db = get_collection()
-        self.client = client  # MongoDB client
+        self.db = get_db()  # Now we get the whole database, not just one collection
+        self.client = client
         self.conversation_history = []
-         
-  
+        self.available_collections = get_all_collections()  # Get all collection names
+
 
     def query_database(self, user_prompt):
         """Generates a query for the database using LLM and executes it."""
         system_prompt = (
             "You are an AI database assistant. Generate MongoDB queries in JSON format "
-            "with keys 'collection' and 'filter'. Do not include explanations."
+            "with keys 'collection' and 'filter'. Ensure that the collection name exists in the database. "
+            f"Available collections: {self.available_collections}. "
+            "Do not include explanations."
         )
-        
+
         payload = {
-            "model": "deepseek-r1-distill-llama-70b",
+            "model": os.getenv("MODEL_NAME"),
             "messages": [
                 {"role": "system", "content": system_prompt},
                 *self.conversation_history,
@@ -41,7 +51,7 @@ class DBAgent:
         for attempt in range(1, self.max_retries + 1):
             try:
                 response = requests.post(self.api_url, headers=headers, json=payload, timeout=self.timeout)
-                
+
                 if response.status_code == 200:
                     data = response.json()
                     llm_response = data["choices"][0]["message"]["content"]
@@ -57,10 +67,10 @@ class DBAgent:
                 else:
                     print(f"API error: {response.status_code} - {response.text}")
                     return {"error": response.text}
-            
+
             except requests.exceptions.RequestException as e:
                 print(f"Request failed (Attempt {attempt}/{self.max_retries}): {e}")
-        
+
         return {"error": "Max retries reached. No response from LLM."}
 
     def _extract_query(self, response):
@@ -89,6 +99,10 @@ class DBAgent:
             if not collection_name:
                 return {"error": "Collection name is required in query."}
 
+            # Validate collection existence
+            if collection_name not in self.available_collections:
+                return {"error": f"Collection '{collection_name}' does not exist."}
+
             if isinstance(query_filter, str):
                 try:
                     query_filter = json.loads(query_filter)
@@ -98,8 +112,8 @@ class DBAgent:
             if not isinstance(query_filter, dict):
                 return {"error": "Filter is not a valid dictionary."}
 
-            # Execute MongoDB query
-            collection = self.db  # `self.db` already holds the collection
+            # Execute MongoDB query on the correct collection
+            collection = self.db[collection_name]  # Dynamically select collection
             results = list(collection.find(query_filter))
             return results
 
