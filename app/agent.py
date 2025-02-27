@@ -11,25 +11,69 @@ load_dotenv()
 
 class DBAgent:
     def __init__(self, max_retries=3, timeout=10):
-        self.api_url = os.getenv("LLM_API_URL") 
+        self.api_url = os.getenv("LLM_API_URL")
         self.api_key = os.getenv("GROQ_API_KEY")  # Securely load API key
         if not self.api_key:
             raise ValueError("Missing GROQ API key in environment variables")
 
         self.max_retries = max_retries
         self.timeout = timeout
-        self.db = get_db()  # Now we get the whole database, not just one collection
+        self.db = get_db()
         self.client = client
         self.conversation_history = []
-        self.available_collections = get_all_collections()  # Get all collection names
+        self.available_collections = get_all_collections()
+        self.collection_fields = self._get_collection_fields()
 
+    def _get_collection_fields(self):
+        """Retrieve all collections and their field names."""
+        collection_fields = {}
+        for collection_name in self.available_collections:
+            sample_doc = self.db[collection_name].find_one()
+            if sample_doc:
+                collection_fields[collection_name] = list(sample_doc.keys())
+        logging.info(f"Collection fields: {collection_fields}")
+        return collection_fields
+
+    def _match_collection(self, user_prompt):
+        """Finds the best matching collection and relevant fields based on user input."""
+        matched_collection = None
+        max_matches = 0
+        best_fields = []
+
+        for collection, fields in self.collection_fields.items():
+            found_fields = [field for field in fields if field.lower() in user_prompt.lower()]
+            if found_fields:
+                matched_collection = collection
+                best_fields = found_fields
+                break  # Stop once we find a match (you can extend this logic to more matches if needed)
+
+        if matched_collection:
+            logging.info(f"Matched collection: {matched_collection} with fields {best_fields}")
+        else:
+            logging.warning("No matching collection found. Trying more general matching...")
+
+            # If no match is found, use general matching with collection names.
+            for collection in self.collection_fields.keys():
+                if collection.lower() in user_prompt.lower():
+                    matched_collection = collection
+                    best_fields = self.collection_fields[collection]
+                    logging.info(f"General match found for collection: {matched_collection}")
+                    break
+
+        return matched_collection, best_fields
 
     def query_database(self, user_prompt):
-        """Generates a query for the database using LLM and executes it."""
+        """Generates and executes a MongoDB query based on the user input."""
+        collection_name, matched_fields = self._match_collection(user_prompt)
+
+        if not collection_name:
+            return {"error": "No matching collection found for the given parameters."}
+
         system_prompt = (
             "You are an AI database assistant. Generate MongoDB queries in JSON format "
             "with keys 'collection' and 'filter'. Ensure that the collection name exists in the database. "
             f"Available collections: {self.available_collections}. "
+            f"Use only these fields for '{collection_name}': {self.collection_fields[collection_name]}. "
             "Do not include explanations."
         )
 
@@ -55,21 +99,20 @@ class DBAgent:
                 if response.status_code == 200:
                     data = response.json()
                     llm_response = data["choices"][0]["message"]["content"]
-                    print("Raw LLM Response:", llm_response)
+                    logging.info(f"Raw LLM Response: {llm_response}")
 
                     query_dict = self._extract_query(llm_response)
                     if query_dict:
-                        logging.info(f"Extracted query filter: {query_dict.get('filter')} (Type: {type(query_dict.get('filter'))})")
                         result = self.execute_query(query_dict)
                         return result
                     else:
                         return {"error": "Invalid query format received from LLM."}
                 else:
-                    print(f"API error: {response.status_code} - {response.text}")
+                    logging.error(f"API error: {response.status_code} - {response.text}")
                     return {"error": response.text}
 
             except requests.exceptions.RequestException as e:
-                print(f"Request failed (Attempt {attempt}/{self.max_retries}): {e}")
+                logging.error(f"Request failed (Attempt {attempt}/{self.max_retries}): {e}")
 
         return {"error": "Max retries reached. No response from LLM."}
 
@@ -77,16 +120,15 @@ class DBAgent:
         """Extracts the MongoDB query JSON from the response."""
         clean_response = re.sub(r'<think>|</think>', '', response)
         match = re.search(r'```json\n(.*?)\n```', clean_response, re.DOTALL)
+
         if match:
             try:
                 query_string = match.group(1)
                 query_dict = json.loads(query_string)
                 logging.info(f"Parsed query: {query_dict}")
-                if isinstance(query_dict.get("filter"), dict):
-                    return query_dict
-                else:
-                    return None
+                return query_dict if isinstance(query_dict.get("filter"), dict) else None
             except json.JSONDecodeError:
+                logging.error("Failed to parse JSON from response.")
                 return None
         return None
 
@@ -99,7 +141,6 @@ class DBAgent:
             if not collection_name:
                 return {"error": "Collection name is required in query."}
 
-            # Validate collection existence
             if collection_name not in self.available_collections:
                 return {"error": f"Collection '{collection_name}' does not exist."}
 
@@ -112,12 +153,16 @@ class DBAgent:
             if not isinstance(query_filter, dict):
                 return {"error": "Filter is not a valid dictionary."}
 
-            # Execute MongoDB query on the correct collection
-            collection = self.db[collection_name]  # Dynamically select collection
-            results = list(collection.find(query_filter))
+            # Ensure the filter only contains valid fields
+            allowed_fields = self.collection_fields.get(collection_name, [])
+            filtered_query = {k: v for k, v in query_filter.items() if k in allowed_fields}
+
+            collection = self.db[collection_name]
+            results = list(collection.find(filtered_query))
             return results
 
         except Exception as e:
+            logging.error(f"Error executing query: {e}")
             return {"error": f"Error executing query: {str(e)}"}
 
     def close(self):
